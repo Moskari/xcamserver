@@ -8,8 +8,9 @@ This Python 3 package is makes the xevacam camera control library a (local) web 
 ## Usage
 Start server with `python run.py`
 
-
+```
 REST API
+
 Every command returns metadata json.
 -------
 /init  ; POST Initializes camera and sets up server for streaming.
@@ -29,7 +30,7 @@ width          ; Width of the image in pixels.
 interleave     ; How data is interleaved in case of spectral data. bil, bsq or bip. For line scanner it is bil.
 status         ; Current status of the server. CLOSED, STOPPED, STARTING, RUNNING.
 stream_address ; Address to the stream.
-
+```
 
 ## Installation
 
