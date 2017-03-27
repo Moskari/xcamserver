@@ -14,7 +14,8 @@ with open('LICENSE') as f:
 
 install_requires = ['Flask>=0.11.1',
                     'numpy>=1.11.2',
-                    'xevacam==0.0.1']
+                    'matplotlib',
+                    'xevacam>=0.0.1']
 
 setup(name='xcamserver',
       version='0.0.1',

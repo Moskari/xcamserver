@@ -63,7 +63,7 @@ class BaseWorker():
 
 class CameraWorker(BaseWorker):
     '''
-    CameraWorker must have only one handler (user) at a time.
+    CameraWorker must have only one handler (the socket server) at a time.
     '''
 
     def __init__(self, camera):
@@ -77,8 +77,8 @@ class CameraWorker(BaseWorker):
     def is_alive(self):
         return self._capture_thread.isAlive()
 
-    def set_handler(self, handler):
-        self.cam.set_handler(handler)
+    def set_handler(self, handler, incl_ctrl_frames=False):
+        self.cam.set_handler(handler, incl_ctrl_frames)
 
     def clear_handlers(self):
         self.cam.clear_handlers()
@@ -118,7 +118,7 @@ class CameraWorker(BaseWorker):
         if not self.initialized:
             self.error('START', 'Camera is not initialized')
             raise Exception('Camera is not initialized')
-        self.set_handler(self.camera_handler)
+        self.set_handler(self.camera_handler, incl_ctrl_frames=True)
         self.status = 'STARTING'
         self.stop_event.clear()
         self._capture_thread = threading.Thread(name='camera thread',
@@ -186,8 +186,8 @@ class DummyWorker(BaseWorker):
     def is_alive(self):
         return self._capture_thread.isAlive()
 
-    def set_handler(self, handler):
-        self.handlers.append(handler)
+    def set_handler(self, handler, incl_ctrl_frames=False):
+        self.handlers.append((handler, incl_ctrl_frames))
 
     def clear_handlers(self):
         self.handlers.clear()
@@ -218,7 +218,8 @@ class DummyWorker(BaseWorker):
         if not self.initialized:
             self.error('Camera is not initialized')
             raise Exception('Camera is not initialized')
-        self.handlers.append(self.camera_handler)
+        # self.handlers.append(self.camera_handler)
+        self.set_handler(self.camera_handler, incl_ctrl_frames=True)
         self.status = 'STARTING'
         self.stop_event.clear()
         self._capture_thread = threading.Thread(name='dummy camera thread',
@@ -247,12 +248,18 @@ class DummyWorker(BaseWorker):
         try:
             i = 0
             while not stop_event.is_set():
-                i = (i + 1) % 256
-                dummy_data = struct.pack('B', i) * self.frame_size
-                for h in self.handlers:
+                # i = (i + 1) % 256
+                val = (i + 1) % 256
+                vals = [val] * self.frame_size
+                dummy_data = struct.pack('%sB' % self.frame_size, *vals)
+                # dummy_data = struct.pack('B', i) * self.frame_size
+                for h, incl_ctrl_frame in self.handlers:
+                    if incl_ctrl_frame:
+                        h.write(struct.pack('I', i))
                     h.write(dummy_data)
                     # print('Wrote to handler.')
                     time.sleep(self.interval)
+                i += 1
         except ConnectionAbortedError as e:
             # TODO: This potentially messes up metadata (mainly status and error)
             # because the variable is not thread safe

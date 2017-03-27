@@ -48,7 +48,7 @@ def init_worker():
     with worker_ctx() as worker:
         try:
             worker.init()
-            xcamserver.socket_server.init()
+            xcamserver.socket_server.init(worker.frame_size)
             xcamserver.socket_server.data_size = worker.frame_size
             # if xcamserver.socket_server is None:
             #     xcamserver.socket_server = SocketServer()

@@ -8,7 +8,7 @@ import xcamserver
 from xcamserver.camera_worker import DummyWorker
 import json
 from xcamserver.socket_server import SocketServer
-from tests.base_test import json2dict, check_meta_keys, BaseTest 
+from tests.base_test import json2dict, check_meta_keys, BaseTest
 
 
 

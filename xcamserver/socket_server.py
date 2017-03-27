@@ -7,6 +7,7 @@ import threading
 import socket
 import select
 import queue
+from xcamserver.framebuffer import FrameQueue
 # from xcamserver import worker_ctx, dummy_worker
 
 
@@ -17,14 +18,16 @@ class SocketServer():
         self.thread = threading.Thread(name='socket thread',
                                        target=self._thread,
                                        args=(self.stop_event,))
-        self.data_size = 1024
+        self._data_size = 4096  # Size of data chunks read from camera
+        self._frame_size = None  # Size of frame read from camera
         self.camera_addr = None
         self.camera_socket = None  # Connection to camera which we are reading
 
         self.server_socket = None
 
-    def init(self,):
+    def init(self, frame_size):
         self.close()
+        self._frame_size = frame_size
         print('Creating new socket...')
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -80,8 +83,7 @@ class SocketServer():
         # TODO: Exception handling
         # TODO: This will definitely stackoverflow if there are no clients ever. Queue needs buffered replacement
         # print('server_socket:', self.server_socket.getsockname(), 'client_socket:', self.camera_addr)
-        queues = {}  # Every outgoing socket gets its own send queue
-
+        queues = {}  # Every outgoing socket gets its own send and receive queues
         while True:
             # Wait for sockets
             (sread, swrite, sexc) = select.select(self.inputs, self.outputs, [], 1)
@@ -91,71 +93,132 @@ class SocketServer():
                 self.outputs.clear()
                 break
             # Check incoming connections
-            for sock in sread:
-                if sock == self.server_socket:
-                    # A "readable" server socket is ready to accept a connection
-                    connection, client_address = sock.accept()
-                    print('new client registration from', client_address)
-                    connection.setblocking(0)
-                    if client_address == self.camera_addr:  # Camera connection
-                        print('It is the camera.')
-                        self.camera_socket = connection
-                        self.inputs.append(connection)
-                    else:
-                        print('It is a new client application.')
-                        # Add the socket to outgoing sockets
-                        if sock not in self.outputs:
-                            self.outputs.append(connection)
-                        # Give the socket its own data queue because sockets
-                        # can be available for sending at different times
-                        if sock not in queues.keys():
-                            queues[connection] = queue.Queue()
-                elif sock == self.camera_socket:  # Camera is sending data
-                    data = sock.recv(self.data_size)
-                    if data:
-                        # print('Received data from camera. Size:', len(data))
-                        for q in queues.values():
-                            q.put(data)
-                    else:
-                        pass
-                        # print('No data from camera. Remove connection', sock.getsockname())
-                        # self.inputs.remove(sock)
-                else:
-                    # Client disconnects
-                    print('Connection from', sock.getsockname())
-                    data = sock.recv(self.data_size)
-                    if data:
-                        print('Received something unexpected from,', sock.getsockname(), 'Data:', data)
-                    else:
-                        self.inputs.remove(sock)
-                        sock.close()
-                        # queues.pop(sock)
-                        print('Removed socket', sock.getsockname(), 'from listened inputs')
+            self._handle_read_reqs(queues, sread, swrite, sexc)
             # Write received camera data to outgoing sockets which are ready
-            for sock in swrite:
-                try:
-                    # data = message_queue.get_nowait()
-                    data = queues[sock].get_nowait()
-                except queue.Empty:
-                    pass
-                    # No messages waiting so stop checking for writability.
-                    # print('Queue is empty')
-                else:
-                    try:
-                        sent_data = 0
-                        # print('Sending data to socket', s.getsockname())
-                        while(sent_data < len(data)):
-                            sent_data += sock.send(data[sent_data:])
-                            # print('Sent', sent_data, 'bytes')
-                        # print('Sent data to socket', sock.getpeername())
-                    except (ConnectionResetError,
-                            ConnectionAbortedError,
-                            ConnectionRefusedError) as e:
-                        sock_addr = sock.getpeername()
-                        print('Connection to', sock_addr, 'lost')
-                        print('%s(%s): %s' % (type(e).__name__, str(e.errno), e.strerror))
-                        queues.pop(sock)
-                        sock.close()
-                        self.outputs.remove(sock)
-                        print('Closed connection to', sock_addr)
+            self._handle_write_reqs(queues, sread, swrite, sexc)
         print('Socket server closed')
+
+    def _remove_socket(self, sock, queues, sread, swrite, sexc):
+        sock_addr, peer_addr = None, None
+        try:
+            sock_addr = sock.getsockname()
+        except:
+            pass
+        try:
+            peer_addr = sock.getpeername()
+        except:
+            pass
+        queues.pop(sock)
+        if sock in self.inputs:
+            self.inputs.remove(sock)
+        if sock in self.outputs:
+            self.outputs.remove(sock)
+        if sock in sread:
+            sread.remove(sock)
+        if sock in swrite:
+            swrite.remove(sock)
+        if sock in sexc:
+            sexc.remove(sock)
+        sock.close()
+        print('Closed connection to', peer_addr, 'from', sock_addr)
+
+    def _handle_read_reqs(self, queues, sread, swrite, sexc):
+
+        for sock in sread:
+            if sock == self.server_socket:
+                # A "readable" server socket is ready to accept a connection
+                connection, client_address = sock.accept()
+                print('new client registration from', client_address)
+                connection.setblocking(0)
+                if client_address == self.camera_addr:  # Camera connection
+                    self._add_camera_sock(connection)
+                else:
+                    self._add_client_sock(connection, queues)
+            elif sock == self.camera_socket:  # Camera is sending data
+                self._recv_from_camera(sock, queues)
+            else:
+                error = self._recv_from_client(sock, queues)
+                if error:
+                    self._remove_socket(sock, queues, sread, swrite, sexc)
+                    continue
+
+    def _add_camera_sock(self, connection):
+        print('It is the camera.')
+        self.camera_socket = connection
+        self.inputs.append(connection)
+
+    def _add_client_sock(self, connection, queues):
+        print('It is a new client application:', connection.getpeername())
+        # Add the socket to outgoing sockets
+        # if sock not in self.outputs:
+        #     self.outputs.append(connection)
+        self.inputs.append(connection)
+        # Give the socket its own data queue because sockets
+        # can be available for sending at different times
+        if connection not in queues.keys():
+            # Outgoing data and control frames
+            tx_q = FrameQueue(self._frame_size + 4)  # timestamp is 4 bytes
+            # Incoming control frames
+            rx_q = FrameQueue(4)
+            rx_q.set_mode(b'\x02')  # Cares only about the newest control frames
+            queues[connection] = (tx_q, rx_q)
+
+    def _recv_from_camera(self, sock, queues):
+        data = sock.recv(self._data_size)
+        if data:
+            for tx_q, _ in queues.values():
+                tx_q.put(data)
+        else:
+            pass
+
+    def _recv_from_client(self, sock, queues):
+        print('Connection from', sock.getpeername())
+        msg_size = 4
+        try:
+            data = sock.recv(msg_size)
+        except (ConnectionAbortedError,
+                ConnectionResetError) as e:
+            return True
+        else:
+            if data == b'':
+                # Client disconnects
+                print('Removing socket', sock.getpeername(), 'from listened inputs and outputs, closing connection.')
+                return True
+            else:
+                print('Received ctrl data:', data, 'from client', sock.getpeername())
+                # print('Received something unexpected from,', sock.getpeername(), 'Data:', data)
+                tx_q, rx_q = queues[sock]
+                rx_q.put(data)
+                if rx_q.buffer_size() >= msg_size:
+                    msg = rx_q.get(4)
+                    print('Received full ctrl package:', msg)
+                    # print(msg[0:1])
+                    tx_q.set_mode(msg[0:1])
+                    if sock not in self.outputs:
+                        self.outputs.append(sock)
+        return False
+
+    def _handle_write_reqs(self, queues, sread, swrite, sexc):
+        for sock in swrite:
+            # data = message_queue.get_nowait()
+            tx_q, _ = queues[sock]
+            data = tx_q.get()
+            if len(data) == 0:
+                pass
+            else:
+                try:
+                    sent_data = 0
+                    # print('Sending data to socket', s.getsockname())
+                    while(sent_data < len(data)):
+                        sent_data += sock.send(data[sent_data:])
+                        # print('Sent', sent_data, 'bytes')
+                    # print('Sent data to socket', sock.getpeername())
+                except (ConnectionResetError,
+                        ConnectionAbortedError,
+                        ConnectionRefusedError) as e:
+                    sock_addr = sock.getpeername()
+                    print('Connection to', sock_addr, 'lost')
+                    print('%s(%s): %s' % (type(e).__name__, str(e.errno), e.strerror))
+                    self._remove_socket(sock, queues, sread, swrite, sexc)
+                    continue
+
